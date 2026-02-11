@@ -1,0 +1,37 @@
+# Core LLM libraries
+anthropic>=0.40.0
+openai>=1.50.0
+google-genai>=0.3.0
+ollama>=0.6.0
+
+# Environment and config
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# CLI interface
+rich>=13.0.0
+typer>=0.12.0
+
+# Async support
+anyio>=4.0.0
+
+# Memory system - Vector database and embeddings (Phase 4)
+chromadb>=0.5.0
+sentence-transformers>=2.3.0
+
+# RAG system - PDF processing and search
+pypdf>=4.0.0
+rank-bm25>=0.2.2
+
+# Web tools - search and fetch (Phase 1.5)
+ddgs>=1.0.0
+httpx>=0.27.0
+
+# Google Calendar integration (Phase 1.5)
+google-api-python-client>=2.0.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.0.0
+
+# For Phase 3 (Telegram) - uncomment when ready
+# python-telegram-bot>=21.0
