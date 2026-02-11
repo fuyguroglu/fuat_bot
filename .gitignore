@@ -37,6 +37,9 @@ env/
 *.swo
 *~
 
+# Private project notes
+CLAUDE.md
+
 # Project specific
 workspace/
 sessions/
