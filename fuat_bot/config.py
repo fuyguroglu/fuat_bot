@@ -6,7 +6,7 @@ Uses pydantic-settings to load from environment variables and .env files.
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -77,6 +77,37 @@ class Settings(BaseSettings):
     email_enabled: bool = False
     email_accounts: dict = Field(default_factory=dict)
     email_default_account: str | None = None
+
+    # Telegram Bot
+    telegram_enabled: bool = False
+    telegram_bot_token: str | None = None
+    telegram_allowed_users: list[int] = Field(default_factory=list)
+    # When True, anyone can use the bot (no allowlist). Use with caution.
+    telegram_open_access: bool = False
+
+    @field_validator("telegram_allowed_users", mode="before")
+    @classmethod
+    def _coerce_allowed_users(cls, v: object) -> list[int]:
+        """Accept a bare int, a comma-separated string, or a JSON array.
+
+        This lets users write either:
+            TELEGRAM_ALLOWED_USERS=123456789          (single ID, no brackets)
+            TELEGRAM_ALLOWED_USERS=123456789,987654   (comma-separated)
+            TELEGRAM_ALLOWED_USERS=[123456789]        (JSON array — preferred)
+        """
+        if isinstance(v, int):
+            return [v]
+        if isinstance(v, list):
+            return [int(x) for x in v]
+        if isinstance(v, str):
+            s = v.strip()
+            # JSON array
+            if s.startswith("["):
+                import json
+                return [int(x) for x in json.loads(s)]
+            # Comma-separated (or single value)
+            return [int(x.strip()) for x in s.split(",") if x.strip()]
+        return []
 
     # Logging
     log_level: str = "INFO"

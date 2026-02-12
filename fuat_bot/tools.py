@@ -639,7 +639,8 @@ TOOL_SCHEMAS = [
     {
         "name": "send_email",
         "description": (
-            "Send an email via SMTP. Supports plain-text and optional HTML body, CC, and BCC. "
+            "Send an email via SMTP. Supports plain-text and optional HTML body, CC, BCC, "
+            "and file attachments from the workspace. "
             "Use the 'account' parameter to choose which configured email account to send from."
         ),
         "input_schema": {
@@ -672,6 +673,15 @@ TOOL_SCHEMAS = [
                 "html": {
                     "type": "string",
                     "description": "Optional HTML version of the body (sent alongside plain text)",
+                },
+                "attachments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional list of workspace-relative file paths to attach "
+                        "(e.g. [\"reports/q1.pdf\", \"data.csv\"]). "
+                        "Files must exist in the workspace directory."
+                    ),
                 },
             },
             "required": ["to", "subject", "body"],

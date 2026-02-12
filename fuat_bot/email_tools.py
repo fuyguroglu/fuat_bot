@@ -25,9 +25,11 @@ Setup for Gmail (per account):
 
 import email as email_lib
 import imaplib
+import mimetypes
 import re
 import smtplib
 import ssl
+from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -203,6 +205,7 @@ def send_email(
     cc: str | None = None,
     bcc: str | None = None,
     html: str | None = None,
+    attachments: list[str] | None = None,
 ) -> dict[str, Any]:
     """Send an email via SMTP.
 
@@ -214,6 +217,8 @@ def send_email(
         cc: Optional CC address(es), comma-separated.
         bcc: Optional BCC address(es), comma-separated.
         html: Optional HTML body (sent as an alternative part alongside plain text).
+        attachments: Optional list of workspace-relative file paths to attach
+            (e.g. ["reports/q1.pdf", "data.csv"]).
 
     Returns:
         Dict with success status or error.
@@ -222,8 +227,39 @@ def send_email(
     if isinstance(cfg, str):
         return {"error": cfg}
 
+    # Resolve and validate attachment paths before building the message
+    resolved_attachments: list[Path] = []
+    if attachments:
+        workspace = settings.workspace_dir.resolve()
+        workspace.mkdir(parents=True, exist_ok=True)
+        for rel_path in attachments:
+            full_path = (workspace / rel_path).resolve()
+            if not str(full_path).startswith(str(workspace)):
+                return {"error": f"Attachment path '{rel_path}' escapes workspace directory"}
+            if not full_path.exists():
+                return {"error": f"Attachment not found: {rel_path}"}
+            if not full_path.is_file():
+                return {"error": f"Attachment path is not a file: {rel_path}"}
+            resolved_attachments.append(full_path)
+
     try:
-        msg = MIMEMultipart("alternative") if html else MIMEMultipart()
+        # With attachments we always need a mixed container; html-only uses alternative
+        if resolved_attachments:
+            msg: MIMEMultipart = MIMEMultipart("mixed")
+            # Nest text parts inside a related/alternative sub-part
+            body_part = MIMEMultipart("alternative")
+            body_part.attach(MIMEText(body, "plain", "utf-8"))
+            if html:
+                body_part.attach(MIMEText(html, "html", "utf-8"))
+            msg.attach(body_part)
+        elif html:
+            msg = MIMEMultipart("alternative")
+            msg.attach(MIMEText(body, "plain", "utf-8"))
+            msg.attach(MIMEText(html, "html", "utf-8"))
+        else:
+            msg = MIMEMultipart()
+            msg.attach(MIMEText(body, "plain", "utf-8"))
+
         msg["From"] = cfg["address"]
         msg["To"] = to
         msg["Date"] = formatdate(localtime=True)
@@ -231,11 +267,23 @@ def send_email(
         if cc:
             msg["Cc"] = cc
 
-        if html:
-            msg.attach(MIMEText(body, "plain", "utf-8"))
-            msg.attach(MIMEText(html, "html", "utf-8"))
-        else:
-            msg.attach(MIMEText(body, "plain", "utf-8"))
+        # Attach files
+        for file_path in resolved_attachments:
+            mime_type, _ = mimetypes.guess_type(str(file_path))
+            if mime_type:
+                main_type, sub_type = mime_type.split("/", 1)
+            else:
+                main_type, sub_type = "application", "octet-stream"
+
+            part = MIMEBase(main_type, sub_type)
+            part.set_payload(file_path.read_bytes())
+            encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename=file_path.name,
+            )
+            msg.attach(part)
 
         all_recipients = [addr for _, addr in getaddresses([to])]
         if cc:
@@ -266,6 +314,7 @@ def send_email(
             "from": cfg["address"],
             "to": to,
             "subject": subject,
+            "attachments_sent": [p.name for p in resolved_attachments],
             "saved_to_sent": saved_to_sent or _is_gmail(cfg),
             "message": "Email sent successfully.",
         }

@@ -526,6 +526,69 @@ def sessions():
         console.print(f"\n[dim]...and {len(session_files) - 20} more[/dim]")
 
 
+@app.command(name="telegram-start")
+def telegram_start(
+    provider: str = typer.Option(
+        None,
+        "--provider", "-p",
+        help="LLM provider (skips interactive selection if provided)",
+    ),
+    model: str = typer.Option(
+        None,
+        "--model",
+        help="Model name (skips interactive selection if provided)",
+    ),
+):
+    """Start the Telegram bot (runs until Ctrl+C).
+
+    Requires TELEGRAM_BOT_TOKEN in .env, plus at least one user ID in
+    TELEGRAM_ALLOWED_USERS (or set TELEGRAM_OPEN_ACCESS=true).
+
+    Examples:
+        # Uses LLM provider/model from .env
+        python -m fuat_bot telegram-start
+
+        # Override provider and model
+        python -m fuat_bot telegram-start -p anthropic --model claude-sonnet-4-20250514
+    """
+    # Provider / model selection — mirrors the chat command
+    if not provider or not model:
+        selected_provider, selected_model = _select_provider_interactive()
+        provider = provider or selected_provider
+        model = model or selected_model
+
+    settings.llm_provider = provider
+    if settings.llm_provider == "ollama":
+        settings.ollama_model = model
+    else:
+        settings.model_name = model
+
+    try:
+        settings.get_api_key()
+    except ValueError as e:
+        console.print(f"\n[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    if not settings.telegram_bot_token:
+        console.print(
+            "\n[red]TELEGRAM_BOT_TOKEN is not set.[/red]\n"
+            "Add it to .env:\n"
+            "  TELEGRAM_BOT_TOKEN=123456:ABC-your-token\n"
+            "  TELEGRAM_ALLOWED_USERS=[your_telegram_user_id]"
+        )
+        raise typer.Exit(1)
+
+    try:
+        from .telegram_interface import TelegramBot
+    except ImportError as e:
+        console.print(f"\n[red]Import error: {e}[/red]")
+        console.print("Install with: pip install 'python-telegram-bot>=21.0'")
+        raise typer.Exit(1)
+
+    bot = TelegramBot()
+    bot.run()
+
+
 @app.command()
 def version():
     """Show version information."""
