@@ -38,6 +38,7 @@ from .calendar_tools import (
     calendar_mark_important_date,
     calendar_get_event,
     calendar_find_free_slots,
+    calendar_exclude_dates,
 )
 
 
@@ -695,6 +696,31 @@ TOOL_SCHEMAS = [
                 },
             },
             "required": ["date"],
+        },
+    },
+    {
+        "name": "calendar_exclude_dates",
+        "description": (
+            "Exclude specific dates from a recurring event series — e.g. to skip public holidays. "
+            "Adds EXDATE entries to the event's recurrence rule so those occurrences are skipped. "
+            "Pass any instance ID or the master event ID; the tool will find the master automatically."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "ID of the recurring event or any of its instances",
+                },
+                "dates": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated dates to skip in ISO format "
+                        "(e.g. '2026-04-23,2026-05-19')"
+                    ),
+                },
+            },
+            "required": ["event_id", "dates"],
         },
     },
     {
@@ -1800,6 +1826,7 @@ TOOL_IMPLEMENTATIONS = {
     "calendar_mark_important_date": calendar_mark_important_date,
     "calendar_get_event": calendar_get_event,
     "calendar_find_free_slots": calendar_find_free_slots,
+    "calendar_exclude_dates": calendar_exclude_dates,
     "send_email": send_email,
     "list_emails": list_emails,
     "read_email": read_email,

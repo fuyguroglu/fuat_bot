@@ -637,6 +637,109 @@ def calendar_mark_important_date(
         return {"error": f"Failed to mark important date: {str(e)}"}
 
 
+def calendar_exclude_dates(
+    event_id: str,
+    dates: str,
+) -> dict[str, Any]:
+    """Exclude specific dates from a recurring event series (e.g. for holidays).
+
+    Adds EXDATE entries to the master event's recurrence rule so that
+    occurrences on those dates are skipped.  Works whether you pass the
+    master event ID or any single-instance ID from the series.
+
+    Args:
+        event_id: ID of the recurring event or any of its instances.
+        dates: Comma-separated dates to skip in ISO format
+               (e.g. "2026-04-23,2026-05-19").
+
+    Returns:
+        Dict with success status and list of newly excluded dates.
+    """
+    try:
+        service = _get_calendar_service()
+        cal_id = settings.google_calendar_id
+
+        # Resolve to the master event
+        event = service.events().get(calendarId=cal_id, eventId=event_id).execute()
+        master_id = event.get("recurringEventId", event_id)
+        master = (
+            service.events().get(calendarId=cal_id, eventId=master_id).execute()
+            if master_id != event_id
+            else event
+        )
+
+        if not master.get("recurrence"):
+            return {"error": "Event is not a recurring event — no recurrence rule found."}
+
+        # Extract the event's start time component to build EXDATE entries
+        start = master.get("start", {})
+        start_dt_str = start.get("dateTime", "")
+        tz = start.get("timeZone", settings.calendar_timezone)
+
+        if start_dt_str:
+            # "2026-02-16T10:30:00" → "103000"
+            time_part = _to_rfc3339(start_dt_str).split("T")[1].replace(":", "")[:6]
+        else:
+            time_part = None  # All-day recurring event
+
+        # Parse the requested dates
+        date_list = [d.strip() for d in dates.split(",") if d.strip()]
+        if not date_list:
+            return {"error": "No dates provided."}
+
+        # Collect dates already excluded to avoid duplicates
+        existing_recurrence = master.get("recurrence", [])
+        already_excluded: set[str] = set()
+        for rule in existing_recurrence:
+            if rule.upper().startswith("EXDATE"):
+                # Last colon-delimited segment holds the date(s)
+                raw_dates = rule.split(":")[-1]
+                for d in raw_dates.split(","):
+                    already_excluded.add(d.strip()[:8])
+
+        # Build new EXDATE lines for dates not already excluded
+        new_exdates: list[str] = []
+        skipped: list[str] = []
+        for date_str in date_list:
+            ymd = date_str.replace("-", "")[:8]
+            if ymd in already_excluded:
+                skipped.append(date_str)
+                continue
+            if time_part:
+                new_exdates.append(f"EXDATE;TZID={tz}:{ymd}T{time_part}")
+            else:
+                new_exdates.append(f"EXDATE;VALUE=DATE:{ymd}")
+
+        if not new_exdates:
+            return {
+                "success": True,
+                "event_id": master_id,
+                "excluded_dates": [],
+                "message": "All requested dates were already excluded.",
+            }
+
+        master["recurrence"] = existing_recurrence + new_exdates
+        service.events().update(
+            calendarId=cal_id, eventId=master_id, body=master
+        ).execute()
+
+        result: dict[str, Any] = {
+            "success": True,
+            "event_id": master_id,
+            "excluded_dates": date_list,
+            "message": (
+                f"Excluded {len(new_exdates)} date(s) from recurring series"
+                + (f" ({len(skipped)} already excluded)." if skipped else ".")
+            ),
+        }
+        return result
+
+    except RuntimeError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Failed to exclude dates: {str(e)}"}
+
+
 def calendar_get_event(event_id: str) -> dict[str, Any]:
     """Fetch full details of a single calendar event by its ID.
 
