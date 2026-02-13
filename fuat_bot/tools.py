@@ -1083,10 +1083,14 @@ def _resolve_path(path: str) -> Path:
     # Resolve the target path
     target = (workspace / path).resolve()
     
-    # Safety: ensure we stay within workspace
-    if not str(target).startswith(str(workspace)):
+    # Safety: ensure we stay within workspace.
+    # Use relative_to() instead of startswith() to avoid the prefix-collision
+    # bypass (e.g. workspace=/work would incorrectly allow /workshop).
+    try:
+        target.relative_to(workspace)
+    except ValueError:
         raise ValueError(f"Path '{path}' escapes workspace directory")
-    
+
     return target
 
 

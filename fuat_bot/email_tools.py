@@ -132,10 +132,21 @@ def _save_to_sent(cfg: dict[str, Any], raw_message: bytes) -> None:
         conn.logout()
 
 
+def _sanitize_imap_query(query: str) -> str:
+    """Strip characters that could break IMAP search syntax.
+
+    IMAP search strings are embedded as quoted strings in the command line.
+    Null bytes, CRLF, double-quotes, and backslashes must be removed to
+    prevent IMAP command injection.
+    """
+    # Remove null bytes, control chars (incl. CR/LF), double-quotes, backslashes
+    return re.sub(r'[\x00-\x1f"\\\x7f]', "", query)
+
+
 def _imap_connect(cfg: dict[str, Any]) -> imaplib.IMAP4_SSL:
     """Open an authenticated IMAP4_SSL connection using the given account config."""
     ctx = ssl.create_default_context()
-    conn = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"], ssl_context=ctx)
+    conn = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"], ssl_context=ctx, timeout=30)
     conn.login(cfg["address"], cfg["password"])
     return conn
 
@@ -234,7 +245,9 @@ def send_email(
         workspace.mkdir(parents=True, exist_ok=True)
         for rel_path in attachments:
             full_path = (workspace / rel_path).resolve()
-            if not str(full_path).startswith(str(workspace)):
+            try:
+                full_path.relative_to(workspace)
+            except ValueError:
                 return {"error": f"Attachment path '{rel_path}' escapes workspace directory"}
             if not full_path.exists():
                 return {"error": f"Attachment not found: {rel_path}"}
@@ -671,16 +684,16 @@ def search_emails(
             if status != "OK":
                 return {"error": f"Could not open folder '{folder}'."}
 
-            encoded_query = query.replace('"', '\\"')
+            safe_query = _sanitize_imap_query(query)
             search_criteria = (
-                f'(OR OR SUBJECT "{encoded_query}" FROM "{encoded_query}" TEXT "{encoded_query}")'
+                f'(OR OR SUBJECT "{safe_query}" FROM "{safe_query}" TEXT "{safe_query}")'
             )
             status, data = conn.search("UTF-8", search_criteria)
 
             if status != "OK":
                 # Fall back to simpler ASCII search
                 search_criteria = (
-                    f'(OR SUBJECT "{encoded_query}" FROM "{encoded_query}")'
+                    f'(OR SUBJECT "{safe_query}" FROM "{safe_query}")'
                 )
                 status, data = conn.search(None, search_criteria)
 
@@ -1108,7 +1121,9 @@ def save_email_attachment(
         workspace = settings.workspace_dir.resolve()
         workspace.mkdir(parents=True, exist_ok=True)
         dest = (workspace / save_path).resolve()
-        if not str(dest).startswith(str(workspace)):
+        try:
+            dest.relative_to(workspace)
+        except ValueError:
             return {"error": "save_path escapes the workspace directory."}
 
         dest.parent.mkdir(parents=True, exist_ok=True)

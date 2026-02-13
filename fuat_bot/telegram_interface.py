@@ -43,33 +43,61 @@ def _strip_markdown(text: str) -> str:
     return text.strip()
 
 
-def _split_message(text: str, max_len: int = _TG_MAX_LEN) -> list[str]:
-    """Split *text* into chunks of at most *max_len* characters.
+def _utf16_len(text: str) -> int:
+    """Return the length of *text* in UTF-16 code units.
 
-    Prefers splitting on paragraph boundaries (\\n\\n), then line boundaries
-    (\\n), then the last space before the limit, and hard-cuts only as a
-    last resort.
+    Telegram measures message length in UTF-16 code units.  Characters in the
+    Basic Multilingual Plane (U+0000–U+FFFF) count as 1 unit; characters
+    outside the BMP (e.g. most emoji, U+10000+) count as 2 units.
     """
-    if len(text) <= max_len:
+    return sum(2 if ord(c) > 0xFFFF else 1 for c in text)
+
+
+def _utf16_safe_cut(text: str, max_units: int) -> int:
+    """Return the character index at which *text* first exceeds *max_units* UTF-16 units.
+
+    The returned index is the last character position whose prefix fits within
+    *max_units*, so ``text[:result]`` is always a valid Python string and its
+    UTF-16 length is ≤ *max_units*.
+    """
+    units = 0
+    for i, ch in enumerate(text):
+        ch_units = 2 if ord(ch) > 0xFFFF else 1
+        if units + ch_units > max_units:
+            return i
+        units += ch_units
+    return len(text)
+
+
+def _split_message(text: str, max_len: int = _TG_MAX_LEN) -> list[str]:
+    """Split *text* into chunks that each fit within *max_len* UTF-16 code units.
+
+    Telegram's hard limit is 4096 UTF-16 code units; _TG_MAX_LEN = 4000 adds
+    a safety margin.  Prefers splitting on paragraph (\\n\\n), line (\\n), or
+    word boundaries, and falls back to a hard cut only as a last resort.
+    """
+    if _utf16_len(text) <= max_len:
         return [text]
 
     chunks: list[str] = []
     while text:
-        if len(text) <= max_len:
+        if _utf16_len(text) <= max_len:
             chunks.append(text)
             break
 
-        # Try paragraph boundary
-        idx = text.rfind("\n\n", 0, max_len)
+        # Find the character index that fits within max_len UTF-16 units
+        cut = _utf16_safe_cut(text, max_len)
+        slice_text = text[:cut]
+
+        # Prefer a natural boundary within that slice
+        idx = slice_text.rfind("\n\n")
         if idx == -1:
-            # Try line boundary
-            idx = text.rfind("\n", 0, max_len)
+            idx = slice_text.rfind("\n")
         if idx == -1:
-            # Try last space
-            idx = text.rfind(" ", 0, max_len)
+            idx = slice_text.rfind(" ")
         if idx == -1:
-            # Hard cut
-            idx = max_len
+            # Hard cut at the UTF-16 boundary (already valid Unicode)
+            idx = cut
 
         chunks.append(text[:idx].rstrip())
         text = text[idx:].lstrip()

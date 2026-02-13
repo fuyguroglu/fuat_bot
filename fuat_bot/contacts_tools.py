@@ -199,7 +199,7 @@ def _fetch_carddav_contacts(cfg: dict) -> list[dict]:
         "PROPFIND", base_url,
         content=propfind_body.encode(),
         headers={"Content-Type": "application/xml", "Depth": "1"},
-        auth=auth, timeout=15, verify=False, follow_redirects=True,
+        auth=auth, timeout=15, follow_redirects=True,
     )
     if r.status_code not in (200, 207):
         raise RuntimeError(
@@ -227,7 +227,7 @@ def _fetch_carddav_contacts(cfg: dict) -> list[dict]:
         "REPORT", base_url,
         content=multiget_body.encode(),
         headers={"Content-Type": "application/xml; charset=utf-8"},
-        auth=auth, timeout=15, verify=False, follow_redirects=True,
+        auth=auth, timeout=15, follow_redirects=True,
     )
     if mr.status_code in (200, 207):
         contacts = _parse_carddav_response(mr.text)
@@ -238,7 +238,7 @@ def _fetch_carddav_contacts(cfg: dict) -> list[dict]:
     contacts = []
     for href in hrefs:
         vcf_url = href if href.startswith("http") else host_root + href
-        gr = httpx.get(vcf_url, auth=auth, timeout=10, verify=False, follow_redirects=True)
+        gr = httpx.get(vcf_url, auth=auth, timeout=10, follow_redirects=True)
         if gr.status_code == 200 and gr.text.strip():
             contact = _parse_vcard(gr.text)
             if contact:

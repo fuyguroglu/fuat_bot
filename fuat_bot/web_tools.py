@@ -5,8 +5,11 @@ Provides internet access via DuckDuckGo search and HTTP page fetching.
 No API keys required.
 """
 
+import ipaddress
+import socket
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urlparse
 
 
 # =============================================================================
@@ -46,6 +49,58 @@ class _TextExtractor(HTMLParser):
 
 
 _FETCH_TRUNCATE = 8_000  # chars — keeps context manageable
+
+# Hostnames that are always considered internal regardless of DNS resolution
+_LOCAL_HOSTNAMES = {"localhost", "ip6-localhost", "ip6-loopback", "broadcasthost"}
+
+
+def _is_ssrf_target(url: str) -> bool:
+    """Return True if the URL resolves to a private/reserved address.
+
+    Blocks:
+    - Literal private/loopback/reserved IP addresses in the URL
+    - Common local hostnames
+    - DNS-resolved addresses that are private/loopback
+
+    This prevents Server-Side Request Forgery (SSRF) attacks where the LLM
+    could be tricked into fetching internal services (metadata APIs, databases, etc.).
+    """
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return True
+
+        # Block common local hostnames
+        if hostname.lower() in _LOCAL_HOSTNAMES:
+            return True
+
+        # If hostname is a literal IP address, check it directly
+        try:
+            ip = ipaddress.ip_address(hostname)
+            return (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_reserved
+                or ip.is_link_local
+                or ip.is_multicast
+            )
+        except ValueError:
+            pass  # Not a literal IP — resolve it below
+
+        # Resolve hostname to IP addresses and check each one
+        try:
+            results = socket.getaddrinfo(hostname, None)
+            for *_, sockaddr in results:
+                ip = ipaddress.ip_address(sockaddr[0])
+                if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                    return True
+        except socket.gaierror:
+            pass  # Can't resolve — let httpx surface the error
+
+        return False
+    except Exception:
+        return False
 
 
 # =============================================================================
@@ -103,6 +158,9 @@ def web_fetch(url: str, extract_text: bool = True) -> dict[str, Any]:
 
     if not url.startswith(("http://", "https://")):
         return {"error": "URL must start with http:// or https://"}
+
+    if _is_ssrf_target(url):
+        return {"error": "URL resolves to a private or reserved address and cannot be fetched."}
 
     try:
         headers = {

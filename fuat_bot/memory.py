@@ -322,8 +322,9 @@ class MemoryManager:
             sql += " AND content LIKE ?"
             params.append(f"%{query}%")
 
-        # Sort and limit - using integer directly to avoid parameter binding issues
-        sql += f" ORDER BY created_at DESC LIMIT {limit}"
+        # Sort and limit — use parameterized binding to prevent SQL injection
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
 
         cursor.execute(sql, params)
         rows = cursor.fetchall()
