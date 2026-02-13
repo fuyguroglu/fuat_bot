@@ -78,7 +78,8 @@ Use the search_documents tool to find relevant information. Always:
 ## Workspace
 Your workspace is a directory where you can create and manage files. All file paths are relative to this workspace.
 
-Current date: {date}
+Current date and time: {date}
+Use this when interpreting relative references like "today", "tomorrow", "next Monday", or "this week".
 """
 
 # More directive system prompt for Ollama models (they need stronger guidance)
@@ -109,7 +110,8 @@ DO NOT respond with explanations of how to call tools. Call them directly.
 
 Always cite sources with document name and page number when using search_documents.
 
-Current date: {date}
+Current date and time: {date}
+Use this when interpreting relative references like "today", "tomorrow", "next Monday", or "this week".
 """
 
 
@@ -223,14 +225,12 @@ class Agent:
     def _get_system_prompt(self) -> str:
         """Build the system prompt with current context and memories."""
         # Use more directive prompt for Ollama models
+        now = datetime.now()
+        date_str = now.strftime("%A, %Y-%m-%d %H:%M")  # e.g. "Friday, 2026-02-13 14:30"
         if self.provider == "ollama":
-            base_prompt = SYSTEM_PROMPT_OLLAMA.format(
-                date=datetime.now().strftime("%Y-%m-%d %H:%M"),
-            )
+            base_prompt = SYSTEM_PROMPT_OLLAMA.format(date=date_str)
         else:
-            base_prompt = SYSTEM_PROMPT.format(
-                date=datetime.now().strftime("%Y-%m-%d %H:%M"),
-            )
+            base_prompt = SYSTEM_PROMPT.format(date=date_str)
 
         # Inject memories if enabled
         if self.memory_manager and settings.memory_injection_enabled:
