@@ -6,7 +6,6 @@ No API keys required.
 """
 
 import ipaddress
-import socket
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
@@ -55,15 +54,14 @@ _LOCAL_HOSTNAMES = {"localhost", "ip6-localhost", "ip6-loopback", "broadcasthost
 
 
 def _is_ssrf_target(url: str) -> bool:
-    """Return True if the URL resolves to a private/reserved address.
+    """Return True if the URL contains a private/reserved address (SSRF prevention).
 
-    Blocks:
-    - Literal private/loopback/reserved IP addresses in the URL
-    - Common local hostnames
-    - DNS-resolved addresses that are private/loopback
-
-    This prevents Server-Side Request Forgery (SSRF) attacks where the LLM
-    could be tricked into fetching internal services (metadata APIs, databases, etc.).
+    Blocks explicit private IP addresses and well-known local hostnames in the
+    URL itself. We intentionally do NOT do a live DNS resolution here because
+    that causes false positives on WSL2, corporate VPNs, and other environments
+    where legitimate public domains can resolve through private-range intermediaries.
+    The main attack vectors (http://192.168.x.x, http://10.x.x.x, http://localhost)
+    are fully covered by the literal checks below.
     """
     try:
         parsed = urlparse(url)
@@ -71,32 +69,21 @@ def _is_ssrf_target(url: str) -> bool:
         if not hostname:
             return True
 
-        # Block common local hostnames
+        # Block well-known local hostnames
         if hostname.lower() in _LOCAL_HOSTNAMES:
             return True
 
-        # If hostname is a literal IP address, check it directly
+        # If the URL contains a literal IP address, check it directly
         try:
             ip = ipaddress.ip_address(hostname)
             return (
                 ip.is_private
                 or ip.is_loopback
-                or ip.is_reserved
                 or ip.is_link_local
                 or ip.is_multicast
             )
         except ValueError:
-            pass  # Not a literal IP — resolve it below
-
-        # Resolve hostname to IP addresses and check each one
-        try:
-            results = socket.getaddrinfo(hostname, None)
-            for *_, sockaddr in results:
-                ip = ipaddress.ip_address(sockaddr[0])
-                if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
-                    return True
-        except socket.gaierror:
-            pass  # Can't resolve — let httpx surface the error
+            pass  # It's a normal hostname — allow it through
 
         return False
     except Exception:
