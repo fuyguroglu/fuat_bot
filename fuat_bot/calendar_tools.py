@@ -105,14 +105,30 @@ def _parse_event(event: dict) -> dict:
 
 
 def _to_rfc3339(dt_str: str) -> str:
-    """Convert 'YYYY-MM-DDTHH:MM:SS' to RFC3339 with UTC offset.
+    """Strip any trailing timezone offset from a datetime string.
 
-    Assumes local-naive datetime strings and appends 'Z' (UTC) if no
-    timezone info is present, which is acceptable for school scheduling.
+    Returns a naive 'YYYY-MM-DDTHH:MM:SS' string.  The timezone is supplied
+    separately via the 'timeZone' field in the event start/end object.
     """
-    if dt_str.endswith("Z") or "+" in dt_str[10:]:
-        return dt_str
-    return dt_str + "Z"
+    # Drop a trailing 'Z'
+    if dt_str.endswith("Z"):
+        dt_str = dt_str[:-1]
+    # Drop a trailing '+HH:MM' or '-HH:MM' offset
+    if len(dt_str) > 10 and (dt_str[-6] in ("+", "-")):
+        dt_str = dt_str[:-6]
+    return dt_str
+
+
+def _make_timed_field(dt_str: str) -> dict:
+    """Build a Calendar API start/end timed-event object.
+
+    Always includes the configured CALENDAR_TIMEZONE so that Google Calendar
+    accepts the event (required for recurring events, recommended for all).
+    """
+    return {
+        "dateTime": _to_rfc3339(dt_str),
+        "timeZone": settings.calendar_timezone,
+    }
 
 
 _DAY_ABBR: dict[str, str] = {
@@ -268,8 +284,8 @@ def calendar_add_event(
 
         body: dict[str, Any] = {
             "summary": title,
-            "start": {"dateTime": _to_rfc3339(start)},
-            "end": {"dateTime": _to_rfc3339(end)},
+            "start": _make_timed_field(start),
+            "end": _make_timed_field(end),
         }
         if description:
             body["description"] = description
@@ -342,9 +358,9 @@ def calendar_update_event(
         if title:
             existing["summary"] = title
         if start:
-            existing["start"] = {"dateTime": _to_rfc3339(start)}
+            existing["start"] = _make_timed_field(start)
         if end:
-            existing["end"] = {"dateTime": _to_rfc3339(end)}
+            existing["end"] = _make_timed_field(end)
         if description is not None:
             existing["description"] = description
         if location is not None:
@@ -514,8 +530,8 @@ def calendar_create_appointment_slots(
 
             body: dict[str, Any] = {
                 "summary": title,
-                "start": {"dateTime": _to_rfc3339(slot_start.isoformat())},
-                "end": {"dateTime": _to_rfc3339(slot_end.isoformat())},
+                "start": _make_timed_field(slot_start.isoformat()),
+                "end": _make_timed_field(slot_end.isoformat()),
             }
             if description:
                 body["description"] = description
@@ -684,8 +700,8 @@ def calendar_find_free_slots(
             return {"error": "duration_minutes is longer than the search window"}
 
         freebusy_body = {
-            "timeMin": _to_rfc3339(window_start.isoformat()),
-            "timeMax": _to_rfc3339(window_end.isoformat()),
+            "timeMin": window_start.isoformat() + "Z",
+            "timeMax": window_end.isoformat() + "Z",
             "items": [{"id": settings.google_calendar_id}],
         }
         result = service.freebusy().query(body=freebusy_body).execute()

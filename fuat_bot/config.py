@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     google_calendar_credentials_file: Path = Field(default=Path("./credentials.json"))
     google_calendar_token_file: Path = Field(default=Path("./token.json"))
     google_calendar_id: str = "primary"
+    # IANA timezone name used for all calendar events, e.g. "Europe/Nicosia", "UTC", "America/New_York"
+    calendar_timezone: str = "UTC"
 
     # Google Contacts (People API) — separate token, same credentials.json
     google_contacts_token_file: Path = Field(default=Path("./contacts_token.json"))
