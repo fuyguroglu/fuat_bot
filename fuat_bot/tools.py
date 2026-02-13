@@ -36,6 +36,8 @@ from .calendar_tools import (
     calendar_delete_event,
     calendar_create_appointment_slots,
     calendar_mark_important_date,
+    calendar_get_event,
+    calendar_find_free_slots,
 )
 
 
@@ -474,7 +476,11 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "calendar_add_event",
-        "description": "Create a new event on Google Calendar.",
+        "description": (
+            "Create a new event on Google Calendar. Supports one-off and recurring events. "
+            "For recurring events supply recurrence_freq and optionally recurrence_until, "
+            "recurrence_count, recurrence_days, and recurrence_interval."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -501,6 +507,43 @@ TOOL_SCHEMAS = [
                 "attendees": {
                     "type": "string",
                     "description": "Optional comma-separated email addresses to invite",
+                },
+                "recurrence_freq": {
+                    "type": "string",
+                    "description": (
+                        "Repeat frequency: 'daily', 'weekly', 'monthly', or 'yearly'. "
+                        "Omit for a one-off event."
+                    ),
+                },
+                "recurrence_until": {
+                    "type": "string",
+                    "description": (
+                        "Stop repeating on this date, ISO format (e.g. '2026-06-30'). "
+                        "Mutually exclusive with recurrence_count."
+                    ),
+                },
+                "recurrence_count": {
+                    "type": "integer",
+                    "description": (
+                        "Stop after this many occurrences. "
+                        "Mutually exclusive with recurrence_until."
+                    ),
+                },
+                "recurrence_days": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated days for weekly recurrence "
+                        "(e.g. 'MO,WE,FR' or 'monday,wednesday,friday'). "
+                        "Only used when recurrence_freq is 'weekly'."
+                    ),
+                },
+                "recurrence_interval": {
+                    "type": "integer",
+                    "description": (
+                        "Repeat every N periods (default 1). "
+                        "E.g. 2 with recurrence_freq='weekly' means every two weeks."
+                    ),
+                    "default": 1,
                 },
             },
             "required": ["title", "start", "end"],
@@ -542,14 +585,27 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "calendar_delete_event",
-        "description": "Delete a calendar event by its ID.",
+        "description": (
+            "Delete a calendar event by its ID. "
+            "For recurring events use 'scope' to control how much of the series is removed."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "event_id": {
                     "type": "string",
                     "description": "The event ID to delete (from calendar_list_events)",
-                }
+                },
+                "scope": {
+                    "type": "string",
+                    "description": (
+                        "For recurring events: "
+                        "'this' — delete only this occurrence (default); "
+                        "'all' — delete the entire series; "
+                        "'following' — delete this and all future occurrences."
+                    ),
+                    "default": "this",
+                },
             },
             "required": ["event_id"],
         },
@@ -588,6 +644,57 @@ TOOL_SCHEMAS = [
                 },
             },
             "required": ["date", "title"],
+        },
+    },
+    {
+        "name": "calendar_get_event",
+        "description": (
+            "Fetch full details of a single calendar event by its ID. "
+            "Returns attendees, recurrence rule, and all other fields. "
+            "Use this when you need complete information about a specific event."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "The event ID (from calendar_list_events or calendar_add_event)",
+                },
+            },
+            "required": ["event_id"],
+        },
+    },
+    {
+        "name": "calendar_find_free_slots",
+        "description": (
+            "Find free time slots in a given day by querying the calendar for busy periods. "
+            "Returns gaps that are at least duration_minutes long within the search window. "
+            "Useful for scheduling meetings or finding available office hours."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Date to check in ISO format (e.g. '2026-03-15')",
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "description": "Minimum slot length needed, in minutes (default 60)",
+                    "default": 60,
+                },
+                "time_min": {
+                    "type": "string",
+                    "description": "Start of search window in HH:MM format (default '09:00')",
+                    "default": "09:00",
+                },
+                "time_max": {
+                    "type": "string",
+                    "description": "End of search window in HH:MM format (default '18:00')",
+                    "default": "18:00",
+                },
+            },
+            "required": ["date"],
         },
     },
     {
@@ -1691,6 +1798,8 @@ TOOL_IMPLEMENTATIONS = {
     "calendar_delete_event": calendar_delete_event,
     "calendar_create_appointment_slots": calendar_create_appointment_slots,
     "calendar_mark_important_date": calendar_mark_important_date,
+    "calendar_get_event": calendar_get_event,
+    "calendar_find_free_slots": calendar_find_free_slots,
     "send_email": send_email,
     "list_emails": list_emails,
     "read_email": read_email,

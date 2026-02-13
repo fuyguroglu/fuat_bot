@@ -68,7 +68,8 @@ def _parse_event(event: dict) -> dict:
     """Extract the fields we care about from a raw Calendar API event."""
     start = event.get("start", {})
     end = event.get("end", {})
-    return {
+
+    result: dict[str, Any] = {
         "id": event.get("id", ""),
         "title": event.get("summary", "(no title)"),
         "start": start.get("dateTime") or start.get("date", ""),
@@ -78,6 +79,29 @@ def _parse_event(event: dict) -> dict:
         "status": event.get("status", "confirmed"),
         "link": event.get("htmlLink", ""),
     }
+
+    # Attendees (only included when present)
+    attendees_raw = event.get("attendees", [])
+    if attendees_raw:
+        result["attendees"] = [
+            {
+                "email": a.get("email", ""),
+                "name": a.get("displayName", ""),
+                "status": a.get("responseStatus", "needsAction"),
+            }
+            for a in attendees_raw
+        ]
+
+    # Recurrence rule (only included for recurring master events)
+    recurrence = event.get("recurrence", [])
+    if recurrence:
+        result["recurrence"] = recurrence
+
+    # For instances: link back to the master series
+    if event.get("recurringEventId"):
+        result["recurring_event_id"] = event["recurringEventId"]
+
+    return result
 
 
 def _to_rfc3339(dt_str: str) -> str:
@@ -89,6 +113,68 @@ def _to_rfc3339(dt_str: str) -> str:
     if dt_str.endswith("Z") or "+" in dt_str[10:]:
         return dt_str
     return dt_str + "Z"
+
+
+_DAY_ABBR: dict[str, str] = {
+    "monday": "MO", "tuesday": "TU", "wednesday": "WE", "thursday": "TH",
+    "friday": "FR", "saturday": "SA", "sunday": "SU",
+    "mo": "MO", "tu": "TU", "we": "WE", "th": "TH",
+    "fr": "FR", "sa": "SA", "su": "SU",
+}
+
+
+def _build_rrule(
+    freq: str,
+    until: str | None = None,
+    count: int | None = None,
+    days: str | None = None,
+    interval: int = 1,
+) -> str:
+    """Build an RFC 5545 RRULE string from friendly parameters.
+
+    Args:
+        freq: Recurrence frequency — "daily", "weekly", "monthly", or "yearly".
+        until: Stop date in ISO format (e.g. "2026-06-30"). Mutually exclusive with count.
+        count: Stop after this many occurrences. Mutually exclusive with until.
+        days: Comma-separated days for weekly recurrence (e.g. "MO,WE,FR" or
+              "monday,wednesday,friday"). Ignored for non-weekly frequencies.
+        interval: Repeat every N periods (default 1). E.g. interval=2 with
+                  freq="weekly" means every two weeks.
+
+    Returns:
+        RRULE string ready to insert into the Google Calendar API recurrence list.
+    """
+    freq_map = {
+        "daily": "DAILY", "weekly": "WEEKLY",
+        "monthly": "MONTHLY", "yearly": "YEARLY",
+    }
+    freq_upper = freq_map.get(freq.lower())
+    if not freq_upper:
+        raise ValueError(
+            f"Invalid frequency '{freq}'. Must be daily, weekly, monthly, or yearly."
+        )
+
+    parts = [f"FREQ={freq_upper}"]
+
+    if interval and interval > 1:
+        parts.append(f"INTERVAL={interval}")
+
+    if days and freq.lower() == "weekly":
+        day_list = [
+            _DAY_ABBR.get(d.strip().lower(), d.strip().upper())
+            for d in days.split(",")
+            if d.strip()
+        ]
+        parts.append(f"BYDAY={','.join(day_list)}")
+
+    if until:
+        # Google Calendar expects YYYYMMDDTHHMMSSZ
+        until_clean = until.replace("-", "")[:8]
+        parts.append(f"UNTIL={until_clean}T235959Z")
+    elif count:
+        parts.append(f"COUNT={count}")
+
+    return "RRULE:" + ";".join(parts)
 
 
 # =============================================================================
@@ -148,8 +234,13 @@ def calendar_add_event(
     description: str | None = None,
     location: str | None = None,
     attendees: str | None = None,
+    recurrence_freq: str | None = None,
+    recurrence_until: str | None = None,
+    recurrence_count: int | None = None,
+    recurrence_days: str | None = None,
+    recurrence_interval: int = 1,
 ) -> dict[str, Any]:
-    """Create a new calendar event.
+    """Create a new calendar event, optionally recurring.
 
     Args:
         title: Event title/summary
@@ -158,6 +249,16 @@ def calendar_add_event(
         description: Optional event description / notes
         location: Optional location (room, URL, address)
         attendees: Optional comma-separated email addresses to invite
+        recurrence_freq: Repeat frequency — "daily", "weekly", "monthly", or "yearly".
+                         Omit for a one-off event.
+        recurrence_until: End date for recurrence in ISO format (e.g. "2026-06-30").
+                          Mutually exclusive with recurrence_count.
+        recurrence_count: Stop after this many occurrences.
+                          Mutually exclusive with recurrence_until.
+        recurrence_days: Comma-separated days for weekly recurrence
+                         (e.g. "MO,WE,FR" or "monday,wednesday,friday").
+        recurrence_interval: Repeat every N periods (default 1).
+                             E.g. 2 with freq="weekly" means every two weeks.
 
     Returns:
         Dict with created event details including id and link
@@ -177,6 +278,15 @@ def calendar_add_event(
         if attendees:
             emails = [e.strip() for e in attendees.split(",") if e.strip()]
             body["attendees"] = [{"email": e} for e in emails]
+        if recurrence_freq:
+            rrule = _build_rrule(
+                freq=recurrence_freq,
+                until=recurrence_until,
+                count=recurrence_count,
+                days=recurrence_days,
+                interval=recurrence_interval,
+            )
+            body["recurrence"] = [rrule]
 
         event = service.events().insert(
             calendarId=settings.google_calendar_id,
@@ -184,13 +294,16 @@ def calendar_add_event(
             sendNotifications=bool(attendees),
         ).execute()
 
+        suffix = f" (repeating {recurrence_freq})" if recurrence_freq else ""
         return {
             "success": True,
             "event": _parse_event(event),
-            "message": f"Event '{title}' created successfully",
+            "message": f"Event '{title}' created successfully{suffix}",
         }
 
     except RuntimeError as e:
+        return {"error": str(e)}
+    except ValueError as e:
         return {"error": str(e)}
     except Exception as e:
         return {"error": f"Failed to create event: {str(e)}"}
@@ -255,27 +368,94 @@ def calendar_update_event(
         return {"error": f"Failed to update event: {str(e)}"}
 
 
-def calendar_delete_event(event_id: str) -> dict[str, Any]:
-    """Delete a calendar event.
+def calendar_delete_event(
+    event_id: str,
+    scope: str = "this",
+) -> dict[str, Any]:
+    """Delete a calendar event, with control over recurring series.
 
     Args:
-        event_id: The event ID to delete (from calendar_list_events)
+        event_id: The event ID to delete (from calendar_list_events).
+                  For recurring events this is an instance ID.
+        scope: How much of a recurring series to delete:
+               - "this"      — delete only this occurrence (default).
+               - "all"       — delete the entire recurring series.
+               - "following" — delete this occurrence and all future ones.
+               Non-recurring events are always deleted fully regardless of scope.
 
     Returns:
-        Dict with success status
+        Dict with success status and description of what was deleted.
     """
+    if scope not in ("this", "all", "following"):
+        return {"error": "scope must be 'this', 'all', or 'following'"}
+
     try:
         service = _get_calendar_service()
+        cal_id = settings.google_calendar_id
 
-        service.events().delete(
-            calendarId=settings.google_calendar_id,
-            eventId=event_id,
-        ).execute()
+        if scope == "this":
+            service.events().delete(calendarId=cal_id, eventId=event_id).execute()
+            return {"success": True, "event_id": event_id, "message": "Event deleted successfully"}
+
+        # For "all" and "following" we need the full event to inspect it
+        event = service.events().get(calendarId=cal_id, eventId=event_id).execute()
+        master_id = event.get("recurringEventId")
+
+        if scope == "all":
+            # Delete the master (or the event itself if it's not part of a series)
+            target_id = master_id or event_id
+            service.events().delete(calendarId=cal_id, eventId=target_id).execute()
+            return {
+                "success": True,
+                "event_id": target_id,
+                "message": "Entire recurring series deleted successfully",
+            }
+
+        # scope == "following"
+        if not master_id:
+            # Not a recurring instance — just delete it
+            service.events().delete(calendarId=cal_id, eventId=event_id).execute()
+            return {
+                "success": True,
+                "event_id": event_id,
+                "message": "Event deleted (not part of a recurring series)",
+            }
+
+        # Determine the start time of this instance to compute UNTIL
+        start = event.get("originalStartTime") or event.get("start", {})
+        start_str = start.get("dateTime") or start.get("date", "")
+        if not start_str:
+            return {"error": "Could not determine instance start time"}
+
+        if "T" in start_str:
+            clean = start_str.replace("Z", "").split("+")[0]
+            instance_dt = datetime.fromisoformat(clean)
+            until_str = (instance_dt - timedelta(seconds=1)).strftime("%Y%m%dT%H%M%SZ")
+        else:
+            from datetime import date as _date
+            d = _date.fromisoformat(start_str)
+            until_str = (d - timedelta(days=1)).strftime("%Y%m%dT235959Z")
+
+        # Patch the master event's RRULE to end just before this instance
+        master = service.events().get(calendarId=cal_id, eventId=master_id).execute()
+        new_recurrence = []
+        for rule in master.get("recurrence", []):
+            if rule.startswith("RRULE:"):
+                parts = [
+                    p for p in rule[len("RRULE:"):].split(";")
+                    if not p.startswith("UNTIL=") and not p.startswith("COUNT=")
+                ]
+                parts.append(f"UNTIL={until_str}")
+                new_recurrence.append("RRULE:" + ";".join(parts))
+            else:
+                new_recurrence.append(rule)
+        master["recurrence"] = new_recurrence
+        service.events().update(calendarId=cal_id, eventId=master_id, body=master).execute()
 
         return {
             "success": True,
-            "event_id": event_id,
-            "message": "Event deleted successfully",
+            "event_id": master_id,
+            "message": "Recurring series truncated — this and all following occurrences deleted",
         }
 
     except RuntimeError as e:
@@ -439,3 +619,136 @@ def calendar_mark_important_date(
         return {"error": str(e)}
     except Exception as e:
         return {"error": f"Failed to mark important date: {str(e)}"}
+
+
+def calendar_get_event(event_id: str) -> dict[str, Any]:
+    """Fetch full details of a single calendar event by its ID.
+
+    Unlike calendar_list_events (which returns summary info), this returns
+    the complete event including attendees, recurrence rule, and conference data.
+
+    Args:
+        event_id: The event ID (from calendar_list_events or calendar_add_event).
+
+    Returns:
+        Dict with full event details or error.
+    """
+    try:
+        service = _get_calendar_service()
+
+        event = service.events().get(
+            calendarId=settings.google_calendar_id,
+            eventId=event_id,
+        ).execute()
+
+        return {"success": True, "event": _parse_event(event)}
+
+    except RuntimeError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Failed to get event: {str(e)}"}
+
+
+def calendar_find_free_slots(
+    date: str,
+    duration_minutes: int = 60,
+    time_min: str = "09:00",
+    time_max: str = "18:00",
+) -> dict[str, Any]:
+    """Find free time slots in a given day using the freebusy API.
+
+    Queries the configured calendar for busy periods and returns gaps that
+    are at least *duration_minutes* long within the requested window.
+
+    Args:
+        date: Date to check in ISO format (e.g. "2026-03-15").
+        duration_minutes: Minimum slot length needed, in minutes (default 60).
+        time_min: Start of the search window in HH:MM format (default "09:00").
+        time_max: End of the search window in HH:MM format (default "18:00").
+
+    Returns:
+        Dict with free_slots list (each has start, end, duration_minutes),
+        busy_periods list, and counts.
+    """
+    try:
+        service = _get_calendar_service()
+
+        window_start = datetime.fromisoformat(f"{date}T{time_min}:00")
+        window_end = datetime.fromisoformat(f"{date}T{time_max}:00")
+
+        if window_start >= window_end:
+            return {"error": "time_min must be before time_max"}
+        if duration_minutes <= 0:
+            return {"error": "duration_minutes must be positive"}
+        if timedelta(minutes=duration_minutes) > (window_end - window_start):
+            return {"error": "duration_minutes is longer than the search window"}
+
+        freebusy_body = {
+            "timeMin": _to_rfc3339(window_start.isoformat()),
+            "timeMax": _to_rfc3339(window_end.isoformat()),
+            "items": [{"id": settings.google_calendar_id}],
+        }
+        result = service.freebusy().query(body=freebusy_body).execute()
+
+        # Parse busy periods returned by the API (UTC ISO strings)
+        cal_data = result.get("calendars", {}).get(settings.google_calendar_id, {})
+        busy: list[list[datetime]] = []
+        for period in cal_data.get("busy", []):
+            s = datetime.fromisoformat(period["start"].replace("Z", "").split("+")[0])
+            e = datetime.fromisoformat(period["end"].replace("Z", "").split("+")[0])
+            busy.append([s, e])
+
+        # Sort and merge overlapping/adjacent busy periods
+        busy.sort(key=lambda x: x[0])
+        merged: list[list[datetime]] = []
+        for s, e in busy:
+            if merged and s < merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+
+        # Find free gaps of at least duration_minutes within the window
+        delta = timedelta(minutes=duration_minutes)
+        free_slots: list[dict[str, Any]] = []
+        cursor = window_start
+
+        for busy_start, busy_end in merged:
+            # Clamp to window
+            busy_start = max(busy_start, window_start)
+            busy_end = min(busy_end, window_end)
+            if cursor + delta <= busy_start:
+                free_slots.append({
+                    "start": cursor.strftime("%H:%M"),
+                    "end": busy_start.strftime("%H:%M"),
+                    "duration_minutes": int((busy_start - cursor).total_seconds() / 60),
+                })
+            cursor = max(cursor, busy_end)
+
+        # Free time after the last busy period
+        if cursor + delta <= window_end:
+            free_slots.append({
+                "start": cursor.strftime("%H:%M"),
+                "end": window_end.strftime("%H:%M"),
+                "duration_minutes": int((window_end - cursor).total_seconds() / 60),
+            })
+
+        return {
+            "success": True,
+            "date": date,
+            "search_window": f"{time_min}–{time_max}",
+            "duration_requested_minutes": duration_minutes,
+            "free_slots": free_slots,
+            "free_count": len(free_slots),
+            "busy_periods": [
+                {"start": s.strftime("%H:%M"), "end": e.strftime("%H:%M")}
+                for s, e in merged
+                if s < window_end and e > window_start
+            ],
+        }
+
+    except RuntimeError as e:
+        return {"error": str(e)}
+    except ValueError as e:
+        return {"error": f"Invalid date/time format: {str(e)}"}
+    except Exception as e:
+        return {"error": f"Failed to find free slots: {str(e)}"}
