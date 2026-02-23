@@ -18,6 +18,7 @@ from .email_tools import (
     send_email,
     list_emails,
     read_email,
+    get_email_thread,
     delete_email,
     search_emails,
     list_folders,
@@ -854,7 +855,10 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "read_email",
-        "description": "Read the full content (headers + body) of a specific email by its UID.",
+        "description": (
+            "Read the full content (headers + body) of a specific email by its UID. "
+            "Automatically checks if you have replied to this email and includes reply status in the response."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -870,6 +874,39 @@ TOOL_SCHEMAS = [
                 "account": {
                     "type": "string",
                     "description": "Named account to read from (e.g. 'personal', 'work'). Uses default if omitted.",
+                },
+                "check_replies": {
+                    "type": "boolean",
+                    "description": "Whether to check if you replied to this email (default: true)",
+                    "default": True,
+                },
+            },
+            "required": ["uid"],
+        },
+    },
+    {
+        "name": "get_email_thread",
+        "description": (
+            "Reconstruct the complete email conversation/thread for a given email. "
+            "Searches both incoming (INBOX) and sent folders to build the full conversation history "
+            "using Message-ID, In-Reply-To, and References headers. Returns all messages in chronological order "
+            "with direction (sent/received), making it easy to see the entire back-and-forth correspondence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "uid": {
+                    "type": "string",
+                    "description": "Email UID to start from (from list_emails or search_emails)",
+                },
+                "folder": {
+                    "type": "string",
+                    "description": "IMAP folder containing the starting email (default: INBOX)",
+                    "default": "INBOX",
+                },
+                "account": {
+                    "type": "string",
+                    "description": "Named account to use (e.g. 'personal', 'work'). Uses default if omitted.",
                 },
             },
             "required": ["uid"],
@@ -1830,6 +1867,7 @@ TOOL_IMPLEMENTATIONS = {
     "send_email": send_email,
     "list_emails": list_emails,
     "read_email": read_email,
+    "get_email_thread": get_email_thread,
     "delete_email": delete_email,
     "search_emails": search_emails,
     "list_folders": list_folders,

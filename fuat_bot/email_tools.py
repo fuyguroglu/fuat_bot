@@ -29,6 +29,7 @@ import mimetypes
 import re
 import smtplib
 import ssl
+from datetime import datetime
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -149,6 +150,67 @@ def _imap_connect(cfg: dict[str, Any]) -> imaplib.IMAP4_SSL:
     conn = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"], ssl_context=ctx, timeout=30)
     conn.login(cfg["address"], cfg["password"])
     return conn
+
+
+def _check_for_replies(conn: imaplib.IMAP4_SSL, cfg: dict, message_id: str) -> dict[str, Any]:
+    """Check if there are any replies to the given message_id in the Sent folder.
+
+    Args:
+        conn: Active IMAP connection.
+        cfg: Account configuration dict.
+        message_id: The Message-ID header to search for in In-Reply-To.
+
+    Returns:
+        Dict with replied (bool), reply_count (int), latest_reply_date (str | None).
+    """
+    result = {"replied": False, "reply_count": 0, "latest_reply_date": None}
+
+    # Try common Sent folder names
+    sent_folders = ["[Gmail]/Sent Mail", "Sent", "Sent Items", "Sent Messages"]
+
+    for sent_folder in sent_folders:
+        try:
+            status, _ = conn.select(sent_folder, readonly=True)
+            if status != "OK":
+                continue  # Try next folder
+
+            # Search for emails where In-Reply-To contains this message_id
+            # IMAP HEADER search requires exact match, so we search ALL and filter manually
+            status, msg_nums = conn.search(None, "ALL")
+            if status != "OK" or not msg_nums[0]:
+                continue
+
+            uids = msg_nums[0].split()
+            replies = []
+
+            for msg_uid in uids[-100:]:  # Check last 100 sent emails for performance
+                try:
+                    status, msg_data = conn.fetch(msg_uid, "(RFC822.HEADER)")
+                    if status != "OK" or not msg_data or not msg_data[0]:
+                        continue
+
+                    # Parse headers only
+                    msg = email_lib.message_from_bytes(msg_data[0][1])
+                    in_reply_to = msg.get("In-Reply-To", "").strip()
+
+                    # Check if this is a reply to our message
+                    if in_reply_to and message_id in in_reply_to:
+                        date_str = msg.get("Date", "")
+                        replies.append(date_str)
+                except Exception:
+                    continue  # Skip problematic messages
+
+            if replies:
+                result["replied"] = True
+                result["reply_count"] = len(replies)
+                # Get the latest reply date (last one in the list)
+                result["latest_reply_date"] = replies[-1] if replies else None
+                break  # Found replies, no need to check other folders
+
+        except Exception:
+            continue  # Try next folder
+
+    return result
 
 
 def _parse_message(raw: bytes) -> dict[str, Any]:
@@ -407,18 +469,21 @@ def read_email(
     uid: str,
     folder: str = "INBOX",
     account: str | None = None,
+    check_replies: bool = True,
 ) -> dict[str, Any]:
     """Read the full content of a specific email by its UID.
 
     Marks the message as read (Seen) after fetching.
+    Optionally checks if you have replied to this email.
 
     Args:
         uid: Email UID (from list_emails or search_emails).
         folder: IMAP folder containing the email (default: INBOX).
         account: Named account from EMAIL_ACCOUNTS (uses default if omitted).
+        check_replies: If True, check Sent folder for replies (default: True).
 
     Returns:
-        Dict with full email content or error.
+        Dict with full email content, reply status, or error.
     """
     cfg = _resolve_account(account)
     if isinstance(cfg, str):
@@ -438,15 +503,186 @@ def read_email(
             parsed = _parse_message(msg_data[0][1])
             parsed["uid"] = uid
             conn.store(uid.encode(), "+FLAGS", "\\Seen")
+
+            # Check for replies if requested
+            reply_info = {"replied": False, "reply_count": 0, "latest_reply_date": None}
+            if check_replies and parsed.get("message_id"):
+                reply_info = _check_for_replies(conn, cfg, parsed["message_id"])
+
         finally:
             conn.logout()
 
-        return {"success": True, "account": cfg["address"], "folder": folder, **parsed}
+        return {
+            "success": True,
+            "account": cfg["address"],
+            "folder": folder,
+            **parsed,
+            **reply_info,
+        }
 
     except imaplib.IMAP4.error as e:
         return {"error": f"IMAP error: {str(e)}"}
     except Exception as e:
         return {"error": f"Failed to read email: {str(e)}"}
+
+
+def get_email_thread(
+    uid: str,
+    folder: str = "INBOX",
+    account: str | None = None,
+) -> dict[str, Any]:
+    """Reconstruct the complete email thread/conversation for a given email.
+
+    Searches both incoming and sent folders to build the full conversation history,
+    using Message-ID, In-Reply-To, and References headers to link messages.
+
+    Args:
+        uid: Email UID to start from (from list_emails or search_emails).
+        folder: IMAP folder containing the starting email (default: INBOX).
+        account: Named account from EMAIL_ACCOUNTS (uses default if omitted).
+
+    Returns:
+        Dict with thread messages in chronological order or error.
+        Format: {"success": True, "thread": [{"date", "from", "to", "subject",
+                 "body_preview", "direction", "uid", "message_id"}, ...]}
+    """
+    cfg = _resolve_account(account)
+    if isinstance(cfg, str):
+        return {"error": cfg}
+
+    try:
+        conn = _imap_connect(cfg)
+        try:
+            # Read the starting email
+            status, _ = conn.select(folder, readonly=True)
+            if status != "OK":
+                return {"error": f"Could not open folder '{folder}'."}
+
+            status, msg_data = conn.fetch(uid.encode(), "(RFC822)")
+            if status != "OK" or not msg_data or not msg_data[0]:
+                return {"error": f"Email with UID {uid} not found."}
+
+            starting_msg = _parse_message(msg_data[0][1])
+            message_id = starting_msg.get("message_id", "")
+            in_reply_to = starting_msg.get("in_reply_to", "")
+            references = starting_msg.get("references", "")
+
+            # Build a set of all message IDs in this thread
+            thread_ids = {message_id} if message_id else set()
+            if in_reply_to:
+                # Extract all message IDs from in_reply_to (can have multiple)
+                thread_ids.update(re.findall(r'<[^>]+>', in_reply_to))
+            if references:
+                # Extract all message IDs from references
+                thread_ids.update(re.findall(r'<[^>]+>', references))
+
+            # Search all folders for messages in this thread
+            thread_messages = []
+            folders_to_search = [folder, "[Gmail]/Sent Mail", "Sent", "Sent Items", "[Gmail]/All Mail", "All Mail"]
+
+            for search_folder in folders_to_search:
+                try:
+                    status, _ = conn.select(search_folder, readonly=True)
+                    if status != "OK":
+                        continue
+
+                    # Search for all messages (we'll filter manually)
+                    status, msg_nums = conn.search(None, "ALL")
+                    if status != "OK" or not msg_nums[0]:
+                        continue
+
+                    uids_list = msg_nums[0].split()
+
+                    # Limit search to recent messages for performance
+                    for msg_uid in uids_list[-200:]:
+                        try:
+                            status, msg_data = conn.fetch(msg_uid, "(RFC822)")
+                            if status != "OK" or not msg_data or not msg_data[0]:
+                                continue
+
+                            parsed = _parse_message(msg_data[0][1])
+                            msg_id = parsed.get("message_id", "")
+                            msg_in_reply_to = parsed.get("in_reply_to", "")
+                            msg_references = parsed.get("references", "")
+
+                            # Check if this message belongs to the thread
+                            is_in_thread = False
+
+                            # Check if message_id is in our thread
+                            if msg_id and msg_id in thread_ids:
+                                is_in_thread = True
+
+                            # Check if this message references any of our thread IDs
+                            if msg_in_reply_to:
+                                for tid in thread_ids:
+                                    if tid in msg_in_reply_to:
+                                        is_in_thread = True
+                                        # Add this message's ID to the thread
+                                        if msg_id:
+                                            thread_ids.add(msg_id)
+                                        break
+
+                            if msg_references:
+                                for tid in thread_ids:
+                                    if tid in msg_references:
+                                        is_in_thread = True
+                                        # Add this message's ID to the thread
+                                        if msg_id:
+                                            thread_ids.add(msg_id)
+                                        break
+
+                            if is_in_thread:
+                                # Determine direction (sent or received)
+                                from_addr = parsed.get("from", "").lower()
+                                direction = "sent" if cfg["address"].lower() in from_addr else "received"
+
+                                # Create preview of body (first 200 chars)
+                                body = parsed.get("body", "")
+                                body_preview = (body[:200] + "...") if len(body) > 200 else body
+
+                                thread_messages.append({
+                                    "date": parsed.get("date", ""),
+                                    "from": parsed.get("from", ""),
+                                    "to": parsed.get("to", ""),
+                                    "subject": parsed.get("subject", ""),
+                                    "body_preview": body_preview,
+                                    "direction": direction,
+                                    "uid": msg_uid.decode() if isinstance(msg_uid, bytes) else str(msg_uid),
+                                    "folder": search_folder,
+                                    "message_id": msg_id,
+                                })
+
+                        except Exception:
+                            continue  # Skip problematic messages
+
+                except Exception:
+                    continue  # Try next folder
+
+            # Sort messages by date (chronological order)
+            # Parse dates and sort, handling unparseable dates gracefully
+            import email.utils as eutils
+
+            def parse_date_safe(date_str):
+                try:
+                    return eutils.parsedate_to_datetime(date_str)
+                except Exception:
+                    return None
+
+            thread_messages.sort(key=lambda m: parse_date_safe(m["date"]) or datetime.min)
+
+        finally:
+            conn.logout()
+
+        return {
+            "success": True,
+            "thread_count": len(thread_messages),
+            "thread": thread_messages,
+        }
+
+    except imaplib.IMAP4.error as e:
+        return {"error": f"IMAP error: {str(e)}"}
+    except Exception as e:
+        return {"error": f"Failed to reconstruct email thread: {str(e)}"}
 
 
 def delete_email(
