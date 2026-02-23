@@ -24,6 +24,7 @@ from rich.console import Console
 
 from .config import settings
 from .tools import TOOL_SCHEMAS, execute_tool
+from .usage_tracker import UsageTracker, UsageLimitExceeded
 
 console = Console()
 
@@ -221,6 +222,20 @@ class Agent:
             self.memory_manager = MemoryManager(settings.memory_dir)
         else:
             self.memory_manager = None
+
+        # Initialize usage tracker
+        if settings.usage_tracking_enabled:
+            self.usage_tracker = UsageTracker(
+                db_path=settings.usage_db_path,
+                daily_limit=settings.usage_daily_limit,
+                monthly_limit=settings.usage_monthly_limit,
+                telegram_user_daily_limit=settings.usage_telegram_user_daily_limit,
+            )
+        else:
+            self.usage_tracker = None
+
+        # Store telegram_user_id for usage tracking (set externally by Telegram bot)
+        self.telegram_user_id: int | None = None
     
     def _get_system_prompt(self) -> str:
         """Build the system prompt with current context and memories."""
@@ -293,6 +308,28 @@ class Agent:
                         gemini_messages.append(genai_types.Content(role="model", parts=parts))
 
         return gemini_messages
+
+    def _extract_token_usage(self, response: Any) -> tuple[int, int]:
+        """
+        Extract token usage from LLM response.
+        Returns (input_tokens, output_tokens).
+        """
+        if self.provider == "anthropic":
+            if hasattr(response, "usage"):
+                return response.usage.input_tokens, response.usage.output_tokens
+        elif self.provider == "gemini":
+            if hasattr(response, "usage_metadata"):
+                input_tokens = getattr(response.usage_metadata, "prompt_token_count", 0)
+                output_tokens = getattr(response.usage_metadata, "candidates_token_count", 0)
+                return input_tokens, output_tokens
+        elif self.provider == "ollama":
+            # Ollama may not always return token usage
+            # Check if prompt_eval_count and eval_count are available
+            if hasattr(response, "prompt_eval_count") and hasattr(response, "eval_count"):
+                return response.prompt_eval_count or 0, response.eval_count or 0
+
+        # Fallback: return 0, 0 if we can't extract usage
+        return 0, 0
 
     def _call_llm(self) -> Any:
         """Make an API call to the LLM (provider-specific)."""
@@ -528,26 +565,54 @@ class Agent:
     def chat(self, user_message: str) -> str:
         """
         Process a user message and return the assistant's response.
-        
+
         This is the main entry point - it handles the full agent loop:
         user message → LLM → (tool calls → results →)* final response
         """
         # Add user message to session
         self.session.add_user_message(user_message)
-        
+
         # Agent loop: keep going until we get a final text response
         max_iterations = 10  # Safety limit
         iteration = 0
-        
+
         while iteration < max_iterations:
             iteration += 1
-            
-            # Call the LLM
-            response = self._call_llm()
-            
+
+            try:
+                # Call the LLM
+                response = self._call_llm()
+
+                # Extract and log token usage
+                if self.usage_tracker:
+                    tokens_in, tokens_out = self._extract_token_usage(response)
+                    if tokens_in > 0 or tokens_out > 0:
+                        # Check if this would exceed limits
+                        try:
+                            self.usage_tracker.check_limits(
+                                model=self.model,
+                                tokens_in=tokens_in,
+                                tokens_out=tokens_out,
+                                telegram_user_id=self.telegram_user_id,
+                            )
+                            # Log the usage
+                            cost = self.usage_tracker.log_usage(
+                                model=self.model,
+                                tokens_in=tokens_in,
+                                tokens_out=tokens_out,
+                                telegram_user_id=self.telegram_user_id,
+                            )
+                        except UsageLimitExceeded:
+                            # Re-raise to be caught by outer handler
+                            raise
+
+            except UsageLimitExceeded as e:
+                # Usage limit exceeded - return error message
+                return f"Usage limit exceeded: {str(e)}\n\nTo continue, please use the override command or wait until the next period."
+
             # Process any tool calls
             has_tool_calls = self._process_tool_calls(response)
-            
+
             if has_tool_calls:
                 # Tool calls were made, loop back for another LLM turn
                 continue
@@ -577,7 +642,7 @@ class Agent:
             self.session.add_assistant_message(final_response)
 
             return final_response
-        
+
         return "I seem to be stuck in a loop. Let me stop here and you can try rephrasing your request."
 
 

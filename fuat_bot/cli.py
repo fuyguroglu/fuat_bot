@@ -233,11 +233,39 @@ def chat(
         console.print()
         with console.status("[bold blue]Thinking...[/bold blue]"):
             response = agent.chat(user_input)
-        
-        # Display response
-        console.print()
-        console.print(Panel(Markdown(response), title="[bold blue]Assistant[/bold blue]", border_style="blue"))
-        console.print()
+
+        # Check if usage limit was exceeded
+        if response.startswith("Usage limit exceeded:"):
+            # Display the error
+            console.print()
+            console.print(Panel(response, title="[bold red]Limit Exceeded[/bold red]", border_style="red"))
+            console.print()
+
+            # Offer override option
+            if settings.usage_tracking_enabled and agent.usage_tracker:
+                # Determine which limit was exceeded
+                if "User daily limit" in response:
+                    override_type = "user_daily"
+                    limit_name = "Telegram user daily limit"
+                else:
+                    override_type = "daily"
+                    limit_name = "global daily limit"
+
+                # Only offer override for daily limits (not monthly)
+                if "monthly limit" not in response.lower():
+                    console.print(f"[yellow]Do you want to override the {limit_name} and continue?[/yellow]")
+                    console.print("[dim]The limit will apply again after the same amount is spent.[/dim]\n")
+
+                    if Confirm.ask("Override limit?", default=False):
+                        agent.usage_tracker.set_override(override_type, agent.telegram_user_id)
+                        console.print("[green]Override activated. You can continue chatting.[/green]\n")
+                    else:
+                        console.print("[dim]Use 'python -m fuat_bot usage override-daily' to override later.[/dim]\n")
+        else:
+            # Display normal response
+            console.print()
+            console.print(Panel(Markdown(response), title="[bold blue]Assistant[/bold blue]", border_style="blue"))
+            console.print()
 
 
 @app.command()
@@ -587,6 +615,125 @@ def telegram_start(
 
     bot = TelegramBot()
     bot.run()
+
+
+@app.command()
+def usage(
+    action: str = typer.Argument(
+        "stats",
+        help="Action: stats (default), override-daily, reset-daily, reset-monthly"
+    ),
+):
+    """View and manage API usage statistics and limits."""
+    if not settings.usage_tracking_enabled:
+        console.print("[yellow]Usage tracking is disabled in settings.[/yellow]")
+        return
+
+    from .usage_tracker import UsageTracker
+
+    tracker = UsageTracker(
+        db_path=settings.usage_db_path,
+        daily_limit=settings.usage_daily_limit,
+        monthly_limit=settings.usage_monthly_limit,
+        telegram_user_daily_limit=settings.usage_telegram_user_daily_limit,
+    )
+
+    if action == "stats":
+        # Show daily and monthly stats
+        daily_stats = tracker.get_daily_stats()
+        monthly_stats = tracker.get_monthly_stats()
+
+        # Global daily stats table
+        table = Table(title="Daily Usage (Global)")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", justify="right")
+
+        global_daily = daily_stats["global"]
+        table.add_row("Input tokens", f"{global_daily['tokens_in']:,}")
+        table.add_row("Output tokens", f"{global_daily['tokens_out']:,}")
+        table.add_row("Total tokens", f"{global_daily['tokens_in'] + global_daily['tokens_out']:,}")
+        table.add_row("Requests", str(global_daily["requests"]))
+        table.add_row("Cost", f"${global_daily['cost']:.4f}")
+
+        if global_daily["limit"] is not None:
+            limit_color = "green" if global_daily['cost'] < global_daily['limit'] else "red"
+            table.add_row(
+                "Daily limit",
+                f"[{limit_color}]${global_daily['limit']:.2f}[/{limit_color}]"
+            )
+            table.add_row(
+                "Remaining",
+                f"[{limit_color}]${max(0, global_daily['limit'] - global_daily['cost']):.4f}[/{limit_color}]"
+            )
+        else:
+            table.add_row("Daily limit", "[dim]No limit[/dim]")
+
+        if global_daily["overridden"]:
+            table.add_row("Status", "[yellow]Override active[/yellow]")
+
+        console.print(table)
+
+        # Monthly stats
+        console.print()
+        monthly_table = Table(title=f"Monthly Usage ({monthly_stats['month']})")
+        monthly_table.add_column("Metric", style="cyan")
+        monthly_table.add_column("Value", justify="right")
+
+        monthly_table.add_row("Total cost", f"${monthly_stats['cost']:.4f}")
+        if monthly_stats["limit"] is not None:
+            limit_color = "green" if monthly_stats['cost'] < monthly_stats['limit'] else "red"
+            monthly_table.add_row(
+                "Monthly limit",
+                f"[{limit_color}]${monthly_stats['limit']:.2f}[/{limit_color}]"
+            )
+            monthly_table.add_row(
+                "Remaining",
+                f"[{limit_color}]${max(0, monthly_stats['limit'] - monthly_stats['cost']):.4f}[/{limit_color}]"
+            )
+        else:
+            monthly_table.add_row("Monthly limit", "[dim]No limit[/dim]")
+
+        console.print(monthly_table)
+
+    elif action == "override-daily":
+        # Set daily override
+        daily_stats = tracker.get_daily_stats()
+        current_cost = daily_stats["global"]["cost"]
+        limit = daily_stats["global"]["limit"]
+
+        if limit is None:
+            console.print("[yellow]No daily limit is set.[/yellow]")
+            return
+
+        console.print(f"\n[bold]Current daily usage:[/bold] ${current_cost:.4f} / ${limit:.2f}")
+        console.print("[yellow]Warning: This will allow spending beyond the daily limit.[/yellow]")
+
+        if Confirm.ask("Override daily limit?", default=False):
+            tracker.set_override("daily")
+            console.print("[green]Daily limit override activated.[/green]")
+            console.print("[dim]The same limit will apply again after another $10 is spent.[/dim]")
+        else:
+            console.print("Cancelled.")
+
+    elif action == "reset-daily":
+        # Reset daily usage
+        if Confirm.ask("[bold red]Reset today's usage stats?[/bold red]", default=False):
+            tracker.reset_daily()
+            console.print("[green]Daily usage stats reset.[/green]")
+        else:
+            console.print("Cancelled.")
+
+    elif action == "reset-monthly":
+        # Reset monthly usage
+        if Confirm.ask("[bold red]Reset this month's usage stats?[/bold red]", default=False):
+            tracker.reset_monthly()
+            console.print("[green]Monthly usage stats reset.[/green]")
+        else:
+            console.print("Cancelled.")
+
+    else:
+        console.print(f"[red]Unknown action: {action}[/red]")
+        console.print("Valid actions: stats, override-daily, reset-daily, reset-monthly")
 
 
 @app.command()

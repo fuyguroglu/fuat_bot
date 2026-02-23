@@ -145,7 +145,10 @@ class TelegramBot:
         if user_id not in self._agents:
             from .agent import create_agent
             session_id = f"tg_{user_id}"
-            self._agents[user_id] = create_agent(session_id)
+            agent = create_agent(session_id)
+            # Set telegram_user_id for usage tracking
+            agent.telegram_user_id = user_id
+            self._agents[user_id] = agent
         return self._agents[user_id]
 
     def _log_unknown_user(self, tg_user: Any) -> None:
@@ -184,7 +187,9 @@ class TelegramBot:
             "Just send me a message and I'll help you out.\n\n"
             "Commands:\n"
             "/help — show this help\n"
-            "/reset — start a fresh conversation"
+            "/reset — start a fresh conversation\n"
+            "/usage — view your usage stats\n"
+            "/override — override your daily usage limit"
         )
 
     async def handle_help(self, update: Any, context: Any) -> None:
@@ -201,6 +206,8 @@ class TelegramBot:
             "Available commands:\n\n"
             "/start — introduction\n"
             "/reset — clear current session and start fresh\n"
+            "/usage — view your usage statistics\n"
+            "/override — override your daily usage limit\n"
             "/help — show this message\n\n"
             "For everything else, just type your message."
         )
@@ -218,6 +225,105 @@ class TelegramBot:
         self._agents.pop(user.id, None)
         await update.message.reply_text(
             "Session cleared. Your next message will start a fresh conversation."
+        )
+
+    async def handle_usage(self, update: Any, context: Any) -> None:
+        """/usage — show your usage statistics."""
+        user = update.effective_user
+        if not self._is_allowed(user.id):
+            self._log_unknown_user(user)
+            await update.message.reply_text(
+                "Sorry, you are not authorized to use this bot."
+            )
+            return
+
+        if not settings.usage_tracking_enabled:
+            await update.message.reply_text("Usage tracking is disabled.")
+            return
+
+        from .usage_tracker import UsageTracker
+
+        tracker = UsageTracker(
+            db_path=settings.usage_db_path,
+            daily_limit=settings.usage_daily_limit,
+            monthly_limit=settings.usage_monthly_limit,
+            telegram_user_daily_limit=settings.usage_telegram_user_daily_limit,
+        )
+
+        stats = tracker.get_daily_stats(telegram_user_id=user.id)
+
+        # Format user stats
+        if "user" in stats:
+            user_stats = stats["user"]
+            message = (
+                f"Your daily usage:\n\n"
+                f"Tokens: {user_stats['tokens_in']:,} in / {user_stats['tokens_out']:,} out\n"
+                f"Cost: ${user_stats['cost']:.4f}"
+            )
+
+            if user_stats["limit"] is not None:
+                remaining = max(0, user_stats["limit"] - user_stats["cost"])
+                message += f" / ${user_stats['limit']:.2f}\n"
+                message += f"Remaining: ${remaining:.4f}"
+
+                if user_stats["overridden"]:
+                    message += "\n\nOverride is active."
+            else:
+                message += "\n\nNo limit set."
+
+            await update.message.reply_text(message)
+        else:
+            await update.message.reply_text("No usage data found for today.")
+
+    async def handle_override(self, update: Any, context: Any) -> None:
+        """/override — override your daily usage limit (admin only)."""
+        user = update.effective_user
+        if not self._is_allowed(user.id):
+            self._log_unknown_user(user)
+            await update.message.reply_text(
+                "Sorry, you are not authorized to use this bot."
+            )
+            return
+
+        # Check if user is in override admin list
+        if user.id not in settings.telegram_override_admins:
+            await update.message.reply_text(
+                "Sorry, only admins can override usage limits.\n"
+                "Contact the bot owner if you need your limit increased."
+            )
+            return
+
+        if not settings.usage_tracking_enabled:
+            await update.message.reply_text("Usage tracking is disabled.")
+            return
+
+        from .usage_tracker import UsageTracker
+
+        tracker = UsageTracker(
+            db_path=settings.usage_db_path,
+            daily_limit=settings.usage_daily_limit,
+            monthly_limit=settings.usage_monthly_limit,
+            telegram_user_daily_limit=settings.usage_telegram_user_daily_limit,
+        )
+
+        stats = tracker.get_daily_stats(telegram_user_id=user.id)
+
+        if "user" not in stats or stats["user"]["limit"] is None:
+            await update.message.reply_text("No usage limit is configured.")
+            return
+
+        user_stats = stats["user"]
+        if user_stats["overridden"]:
+            await update.message.reply_text("Override is already active.")
+            return
+
+        # Set override
+        tracker.set_override("user_daily", telegram_user_id=user.id)
+
+        await update.message.reply_text(
+            f"Override activated!\n\n"
+            f"Current usage: ${user_stats['cost']:.4f}\n"
+            f"The ${user_stats['limit']:.2f} limit will apply again after spending another ${user_stats['limit']:.2f}."
         )
 
     async def handle_message(self, update: Any, context: Any) -> None:
@@ -286,6 +392,8 @@ class TelegramBot:
         app.add_handler(CommandHandler("start", self.handle_start))
         app.add_handler(CommandHandler("help", self.handle_help))
         app.add_handler(CommandHandler("reset", self.handle_reset))
+        app.add_handler(CommandHandler("usage", self.handle_usage))
+        app.add_handler(CommandHandler("override", self.handle_override))
         app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
         )

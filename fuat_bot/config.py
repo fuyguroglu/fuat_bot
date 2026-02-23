@@ -86,6 +86,15 @@ class Settings(BaseSettings):
     telegram_allowed_users: list[int] = Field(default_factory=list)
     # When True, anyone can use the bot (no allowlist). Use with caution.
     telegram_open_access: bool = False
+    # List of Telegram user IDs allowed to override usage limits (admins/trusted users)
+    telegram_override_admins: list[int] = Field(default_factory=list)
+
+    # Usage tracking & cost limits
+    usage_tracking_enabled: bool = True
+    usage_db_path: Path = Field(default=Path("./memory/usage.db"))
+    usage_daily_limit: float | None = None  # USD per day (global), None = no limit
+    usage_monthly_limit: float | None = None  # USD per month (global), None = no limit
+    usage_telegram_user_daily_limit: float | None = None  # USD per day per Telegram user
 
     @field_validator("telegram_allowed_users", mode="before")
     @classmethod
@@ -96,6 +105,27 @@ class Settings(BaseSettings):
             TELEGRAM_ALLOWED_USERS=123456789          (single ID, no brackets)
             TELEGRAM_ALLOWED_USERS=123456789,987654   (comma-separated)
             TELEGRAM_ALLOWED_USERS=[123456789]        (JSON array — preferred)
+        """
+        if isinstance(v, int):
+            return [v]
+        if isinstance(v, list):
+            return [int(x) for x in v]
+        if isinstance(v, str):
+            s = v.strip()
+            # JSON array
+            if s.startswith("["):
+                import json
+                return [int(x) for x in json.loads(s)]
+            # Comma-separated (or single value)
+            return [int(x.strip()) for x in s.split(",") if x.strip()]
+        return []
+
+    @field_validator("telegram_override_admins", mode="before")
+    @classmethod
+    def _coerce_override_admins(cls, v: object) -> list[int]:
+        """Accept a bare int, a comma-separated string, or a JSON array.
+
+        Same format as telegram_allowed_users.
         """
         if isinstance(v, int):
             return [v]
