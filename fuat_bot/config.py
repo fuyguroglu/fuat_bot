@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     google_calendar_id: str = "primary"
     # IANA timezone name used for all calendar events, e.g. "Europe/Nicosia", "UTC", "America/New_York"
     calendar_timezone: str = "UTC"
+    # Working hours (used as defaults for finding free slots)
+    working_hours_start: str = "09:00"
+    working_hours_end: str = "18:00"
 
     # Google Contacts (People API) — separate token, same credentials.json
     google_contacts_token_file: Path = Field(default=Path("./contacts_token.json"))

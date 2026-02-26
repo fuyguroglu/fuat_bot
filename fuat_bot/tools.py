@@ -451,7 +451,11 @@ TOOL_SCHEMAS = [
     # -------------------------------------------------------------------------
     {
         "name": "calendar_list_events",
-        "description": "List calendar events in a date range. Optionally filter by a text query.",
+        "description": (
+            "List existing scheduled events in a date range — shows WHAT is already booked. "
+            "Use this to see scheduled meetings, appointments, and commitments. "
+            "Do NOT use this to find availability or free time — use calendar_find_free_slots instead."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -669,9 +673,10 @@ TOOL_SCHEMAS = [
     {
         "name": "calendar_find_free_slots",
         "description": (
-            "Find free time slots in a given day by querying the calendar for busy periods. "
-            "Returns gaps that are at least duration_minutes long within the search window. "
-            "Useful for scheduling meetings or finding available office hours."
+            "Find available/free time slots — shows WHEN you're free (gaps between events). "
+            "Use this when asked about availability, open slots, free time, or when to schedule something. "
+            "Queries the calendar for busy periods and returns the gaps in between. "
+            "Do NOT use calendar_list_events for finding availability — use THIS tool instead."
         ),
         "input_schema": {
             "type": "object",
@@ -687,13 +692,11 @@ TOOL_SCHEMAS = [
                 },
                 "time_min": {
                     "type": "string",
-                    "description": "Start of search window in HH:MM format (default '09:00')",
-                    "default": "09:00",
+                    "description": "Start of search window in HH:MM format. Defaults to configured working hours start.",
                 },
                 "time_max": {
                     "type": "string",
-                    "description": "End of search window in HH:MM format (default '18:00')",
-                    "default": "18:00",
+                    "description": "End of search window in HH:MM format. Defaults to configured working hours end.",
                 },
             },
             "required": ["date"],

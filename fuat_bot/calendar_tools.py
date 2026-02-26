@@ -65,15 +65,38 @@ def _get_calendar_service():
 
 
 def _parse_event(event: dict) -> dict:
-    """Extract the fields we care about from a raw Calendar API event."""
+    """Extract the fields we care about from a raw Calendar API event.
+
+    Converts all datetimes to the user's configured timezone for consistent display.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo  # type: ignore
+
     start = event.get("start", {})
     end = event.get("end", {})
+
+    # Parse start time - Google Calendar API returns times already in the event's local timezone
+    start_str = start.get("dateTime") or start.get("date", "")
+    if start_str and "T" in start_str:
+        # The API returns times like "2026-03-02T10:30:00+02:00" which is already in local time
+        # Just parse and strip the timezone info for cleaner output
+        start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        # Format without timezone - the time value is already correct for the local timezone
+        start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Parse end time
+    end_str = end.get("dateTime") or end.get("date", "")
+    if end_str and "T" in end_str:
+        end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+        end_str = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
     result: dict[str, Any] = {
         "id": event.get("id", ""),
         "title": event.get("summary", "(no title)"),
-        "start": start.get("dateTime") or start.get("date", ""),
-        "end": end.get("dateTime") or end.get("date", ""),
+        "start": start_str,
+        "end": end_str,
         "location": event.get("location", ""),
         "description": event.get("description", ""),
         "status": event.get("status", "confirmed"),
@@ -215,16 +238,35 @@ def calendar_list_events(
         Dict with "events" list and "count"
     """
     try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        try:
+            from backports.zoneinfo import ZoneInfo  # type: ignore
+        except ImportError:
+            return {"error": "zoneinfo not available. Install backports.zoneinfo for Python < 3.9"}
+
+    try:
         service = _get_calendar_service()
 
-        # Ensure RFC3339 format
-        time_min = _to_rfc3339(start_date if "T" in start_date else start_date + "T00:00:00")
-        time_max = _to_rfc3339(end_date if "T" in end_date else end_date + "T23:59:59")
+        # Create timezone-aware datetimes and format as RFC3339
+        tz = ZoneInfo(settings.calendar_timezone)
+
+        # Parse start date/time
+        if "T" in start_date:
+            time_min_dt = datetime.fromisoformat(start_date).replace(tzinfo=tz)
+        else:
+            time_min_dt = datetime.fromisoformat(start_date + "T00:00:00").replace(tzinfo=tz)
+
+        # Parse end date/time
+        if "T" in end_date:
+            time_max_dt = datetime.fromisoformat(end_date).replace(tzinfo=tz)
+        else:
+            time_max_dt = datetime.fromisoformat(end_date + "T23:59:59").replace(tzinfo=tz)
 
         kwargs: dict[str, Any] = {
             "calendarId": settings.google_calendar_id,
-            "timeMin": time_min,
-            "timeMax": time_max,
+            "timeMin": time_min_dt.isoformat(),
+            "timeMax": time_max_dt.isoformat(),
             "maxResults": min(max_results, 250),
             "singleEvents": True,
             "orderBy": "startTime",
@@ -771,8 +813,8 @@ def calendar_get_event(event_id: str) -> dict[str, Any]:
 def calendar_find_free_slots(
     date: str,
     duration_minutes: int = 60,
-    time_min: str = "09:00",
-    time_max: str = "18:00",
+    time_min: str | None = None,
+    time_max: str | None = None,
 ) -> dict[str, Any]:
     """Find free time slots in a given day using the freebusy API.
 
@@ -782,18 +824,36 @@ def calendar_find_free_slots(
     Args:
         date: Date to check in ISO format (e.g. "2026-03-15").
         duration_minutes: Minimum slot length needed, in minutes (default 60).
-        time_min: Start of the search window in HH:MM format (default "09:00").
-        time_max: End of the search window in HH:MM format (default "18:00").
+        time_min: Start of the search window in HH:MM format.
+                  Defaults to WORKING_HOURS_START from settings.
+        time_max: End of the search window in HH:MM format.
+                  Defaults to WORKING_HOURS_END from settings.
 
     Returns:
         Dict with free_slots list (each has start, end, duration_minutes),
         busy_periods list, and counts.
     """
     try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        try:
+            from backports.zoneinfo import ZoneInfo  # type: ignore
+        except ImportError:
+            return {"error": "zoneinfo not available. Install backports.zoneinfo for Python < 3.9"}
+
+    try:
         service = _get_calendar_service()
 
-        window_start = datetime.fromisoformat(f"{date}T{time_min}:00")
-        window_end = datetime.fromisoformat(f"{date}T{time_max}:00")
+        # Use configured working hours as defaults
+        if time_min is None:
+            time_min = settings.working_hours_start
+        if time_max is None:
+            time_max = settings.working_hours_end
+
+        # Create timezone-aware datetimes in the user's configured timezone
+        tz = ZoneInfo(settings.calendar_timezone)
+        window_start = datetime.fromisoformat(f"{date}T{time_min}:00").replace(tzinfo=tz)
+        window_end = datetime.fromisoformat(f"{date}T{time_max}:00").replace(tzinfo=tz)
 
         if window_start >= window_end:
             return {"error": "time_min must be before time_max"}
@@ -802,26 +862,29 @@ def calendar_find_free_slots(
         if timedelta(minutes=duration_minutes) > (window_end - window_start):
             return {"error": "duration_minutes is longer than the search window"}
 
+        # Query the freebusy API with RFC3339-formatted times
         freebusy_body = {
-            "timeMin": window_start.isoformat() + "Z",
-            "timeMax": window_end.isoformat() + "Z",
+            "timeMin": window_start.isoformat(),
+            "timeMax": window_end.isoformat(),
+            "timeZone": settings.calendar_timezone,
             "items": [{"id": settings.google_calendar_id}],
         }
         result = service.freebusy().query(body=freebusy_body).execute()
 
-        # Parse busy periods returned by the API (UTC ISO strings)
+        # Parse busy periods returned by the API
         cal_data = result.get("calendars", {}).get(settings.google_calendar_id, {})
         busy: list[list[datetime]] = []
         for period in cal_data.get("busy", []):
-            s = datetime.fromisoformat(period["start"].replace("Z", "").split("+")[0])
-            e = datetime.fromisoformat(period["end"].replace("Z", "").split("+")[0])
+            # Parse the datetime strings with timezone info and convert to local timezone
+            s = datetime.fromisoformat(period["start"].replace("Z", "+00:00")).astimezone(tz)
+            e = datetime.fromisoformat(period["end"].replace("Z", "+00:00")).astimezone(tz)
             busy.append([s, e])
 
         # Sort and merge overlapping/adjacent busy periods
         busy.sort(key=lambda x: x[0])
         merged: list[list[datetime]] = []
         for s, e in busy:
-            if merged and s < merged[-1][1]:
+            if merged and s <= merged[-1][1]:
                 merged[-1][1] = max(merged[-1][1], e)
             else:
                 merged.append([s, e])
@@ -832,7 +895,7 @@ def calendar_find_free_slots(
         cursor = window_start
 
         for busy_start, busy_end in merged:
-            # Clamp to window
+            # Clamp busy period to window
             busy_start = max(busy_start, window_start)
             busy_end = min(busy_end, window_end)
             if cursor + delta <= busy_start:
